@@ -1,0 +1,77 @@
+// Shared base. The two runnable configs `extend` this and add their generator:
+//
+//   gemma_reasoning_answer   generator.type = gemma_direct
+//   gemma_two_stage          generator.type = gemma_two_stage
+//
+// This file holds everything the two have in common: Gemma load settings, the
+// DeBERTa scorer, filters, selection and chunking. It names no generator
+// adapter, so it is not runnable on its own.
+//
+// Only FULL-LINE // comments are stripped by the loader. A trailing comment on a
+// value line is a JSON syntax error.
+{
+  // ---------------------------------------------------------------- stage 1
+  // Load settings shared by both Gemma modes; each mode's config adds `type`,
+  // its base_model/adapter repo ids, prompts and decode settings.
+  "generator": {
+    // bf16 on CUDA, fp32 elsewhere.
+    "dtype": "auto",
+    // Gemma 2's logit soft-capping is only implemented on the eager path.
+    "attn_implementation": "eager"
+  },
+
+  // ---------------------------------------------------------------- stage 2
+  "scorer": {
+    "type": "sequence_classification",
+
+    // A Hugging Face repo id -- exactly what loads. The fine-tuned
+    // deberta-v3-LARGE reasoning scorer: 435.1M params, 24 layers, hidden 1024,
+    // classifier [2, 1024], id2label {0: INCORRECT, 1: CORRECT}, fp32.
+    // Deliberately NOT a bare `microsoft/deberta-v3-*`: a base model loads fine
+    // but has a randomly initialized head, so its scores are noise.
+    "model": "ronietz/cryptic-deberta-large-reasoning-scorer",
+
+    // MUST match the template the scorer was fine-tuned with. A scorer fed a
+    // layout it never saw returns confident nonsense rather than an error.
+    // Verify with: python code/pipeline/run_pipeline.py --verify-scorer 200
+    "template": "CLUE: {clue}\nANSWER: {answer}\nREASONING: {reason}",
+
+    // null => read the positive class off the checkpoint's own label2id
+    // (CORRECT -> 1), so a scorer trained with the labels reversed does not
+    // silently invert the ranking. Set to "CORRECT" or an int to force it.
+    "positive_label": null,
+
+    // MUST match fine-tuning (MAX_LENGTH=256). Never above 512: the checkpoint
+    // only has 512 position embeddings.
+    "max_length": 256,
+
+    // deberta-v3-large shares the GPU with gemma-2-2b; drop to 8 if a card OOMs.
+    "batch_size": 16,
+
+    // fp32, matching the checkpoint and its training. `auto` would load bf16 on
+    // CUDA, and bf16 rounding can reorder near-tied candidates -- exactly the
+    // comparison this model exists to make.
+    "dtype": "float32"
+  },
+
+  // ---------------------------------------------------------------- stage 1b
+  // Model-free filters. Free accuracy: an answer of the wrong length cannot fit
+  // the grid, so it cannot be right.
+  "filters": {
+    "enumeration": true,
+    "min_answer_chars": 2,
+    "max_answer_chars": 40
+  },
+
+  // ---------------------------------------------------------------- stage 3
+  "selection": {
+    // scorer    | the pipeline as designed: argmax of the scorer's P(correct)
+    // generator | ablation -- best-ranked surviving candidate, no scorer
+    "combine": "scorer"
+  },
+
+  // Clues per generate/score/write cycle. Also the resume granularity: a
+  // preempted job loses at most this many clues.
+  "chunk_size": 32,
+  "device": "auto"
+}

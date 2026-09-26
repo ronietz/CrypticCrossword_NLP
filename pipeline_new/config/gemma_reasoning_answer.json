@@ -1,0 +1,65 @@
+// Gemma DIRECT mode: one LoRA adapter emits the reasoning AND the answer.
+//
+//   python code/pipeline/run_pipeline.py --config gemma_reasoning_answer --split test --limit 1000
+//
+// Generator: ronietz/cryptic-gemma2-2b-reasoning-answer, a LoRA adapter on
+//            google/gemma-2-2b (trained by finetune_gemma2_reasoning.py on the
+//            STaR iter0 source/target pairs).
+// Scorer:    ronietz/cryptic-deberta-large-reasoning-scorer (restated below
+//            for an explicit mapping; other scorer settings come from default.json).
+//
+// google/gemma-2-2b is a GATED repo: accept its licence on huggingface.co, then
+// `huggingface-cli login` or export HF_TOKEN. Never put a token in this file.
+{
+  "extends": "default",
+
+  "generator": {
+    "type": "gemma_direct",
+
+    // Hugging Face repo ids only -- exactly what loads. The adapter is a
+    // PEFT/LoRA adapter (no full weights): base loaded with AutoModelForCausalLM,
+    // adapter with PeftModel.from_pretrained, tokenizer from the adapter repo.
+    "base_model": "google/gemma-2-2b",
+    "adapter": "ronietz/cryptic-gemma2-2b-reasoning-answer",
+
+    // MUST match training. finetune_gemma2_reasoning.py fed "<source>\nresponse: "
+    // where <source> is the STaR render_source() string: enumeration stripped
+    // from the clue, enumeration bare ("4,5"), and "letters:" = the letter COUNT
+    // (a number, not the answer). The prompt was tokenized WITH special tokens
+    // (BOS), hence add_special_tokens=true.
+    "prompt": "solve the cryptic clue. clue: {clue_text} ; enumeration: {enumeration_bare} ; letters: {letter_count}\nresponse: ",
+    "add_special_tokens": true,
+
+    // greedy_sample_union: 1 greedy decode (rank 0 = the baseline) + k-1 samples.
+    "strategy": "greedy_sample_union",
+    "num_candidates": 12,
+    "temperature": 1.0,
+    "top_p": 0.95,
+
+    // Training used MAX_LENGTH=256 for prompt+target and evaluated with 128 new tokens.
+    "max_input_tokens": 256,
+    "max_new_tokens": 128,
+    // Prompts per generate() call; each yields num_candidates sequences.
+    "batch_size": 8,
+
+    // dtype / attn_implementation: shared, from default.json.
+
+    // Output: "definition: X ; wordplay: Y ; answer: A L B A T R O S S".
+    // Everything before "answer:" (definition AND wordplay) becomes the reason.
+    // A decode with no "answer:" (truncated/malformed) gets an empty answer and
+    // is dropped by the filters.
+    "parse": {
+      "patterns": [
+        "(?is)^\\s*(?P<reason>.*?)[\\s;]*\\banswer\\s*:\\s*(?P<answer>[^;\\n]+)"
+      ],
+      "strip_enumeration": true,
+      // STaR targets spell the answer one letter per token; rejoin, and restore
+      // word breaks from the enumeration when the letter count agrees.
+      "join_spaced_letters": true
+    }
+  },
+
+  "scorer": {
+    "model": "ronietz/cryptic-deberta-large-reasoning-scorer"
+  }
+}

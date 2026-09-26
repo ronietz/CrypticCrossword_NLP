@@ -1,0 +1,89 @@
+// Gemma TWO-STAGE mode: answer adapter proposes k answers, wordplay adapter
+// explains each one, the DeBERTa scorer reranks.
+//
+//   python code/pipeline/run_pipeline.py --config gemma_two_stage --split test --limit 1000
+//
+//   clue -> [answer adapter] -> k answers -> dedup
+//        -> [wordplay adapter, once per answer] -> Candidate(answer, reason)
+//        -> filters -> DeBERTa -> select
+//
+// Both adapters (trained by finetune_gemma2_pipeline.py --task answer|wordplay)
+// name the same base_model, so they are loaded once onto ONE copy of
+// google/gemma-2-2b and switched per stage.
+// Scorer: ronietz/cryptic-deberta-large-reasoning-scorer (restated below for an
+// explicit mapping; other scorer settings come from default.json).
+//
+// google/gemma-2-2b is a GATED repo: accept its licence on huggingface.co, then
+// `huggingface-cli login` or export HF_TOKEN. Never put a token in this file.
+//
+// Per-stage settings live under "answer" and "wordplay"; override them as e.g.
+//   --set generator.answer.num_candidates=20
+//   --set generator.wordplay.max_new_tokens=96
+{
+  "extends": "default",
+
+  "generator": {
+    "type": "gemma_two_stage",
+
+    // dtype / attn_implementation: shared, from default.json.
+
+    // ---- stage A: answer generator
+    "answer": {
+      // Hugging Face repo ids only -- exactly what loads.
+      "base_model": "google/gemma-2-2b",
+      "adapter": "ronietz/cryptic-gemma2-2b-answer",
+
+      // MUST match finetune_gemma2_pipeline.py --task answer. Its data is
+      // STaR-processed: enumeration stripped from the clue, enumeration bare
+      // ("4,5"). The `letters` field is deliberately NOT used -- in that data it
+      // holds the answer itself. Prompt tokenized WITHOUT special tokens (no BOS).
+      "prompt": "solve the cryptic clue.\nclue: {clue_text}\nenumeration: {enumeration_bare}\nanswer:",
+      "add_special_tokens": false,
+
+      // greedy_sample_union: 1 greedy decode (rank 0 = the BASELINE) + k-1
+      // samples. Duplicates are collapsed after normalization, rank preserved.
+      "strategy": "greedy_sample_union",
+      "num_candidates": 12,
+      "temperature": 1.0,
+      "top_p": 0.95,
+
+      // Training truncation: prompt 96 tokens, target 24.
+      "max_input_tokens": 96,
+      "max_new_tokens": 24,
+      // Clues per generate() call; each yields num_candidates sequences.
+      "batch_size": 16,
+
+      // Answer cleaning only; the stage emits the answer alone, so no patterns.
+      "parse": {
+        "strip_enumeration": true
+      }
+    },
+
+    // ---- stage B: wordplay generator, ONE decode per unique answer
+    "wordplay": {
+      // Same base_model as the answer stage => same loaded copy, no reload.
+      "base_model": "google/gemma-2-2b",
+      "adapter": "ronietz/cryptic-gemma2-2b-wordplay",
+
+      // MUST match finetune_gemma2_pipeline.py --task wordplay. The training
+      // answers were the uppercase surface form ("PIPE DREAM"), hence
+      // {answer_upper}; {answer} would give the lowercase pipeline form.
+      "prompt": "explain the cryptic clue.\nclue: {clue_text}\nenumeration: {enumeration_bare}\nanswer: {answer_upper}\nreasoning:",
+      "add_special_tokens": false,
+
+      // Exactly one decode per answer: "greedy", or "sample" with num_candidates=1.
+      "strategy": "greedy",
+      "num_candidates": 1,
+
+      // Training truncation: prompt 128 tokens, target 160.
+      "max_input_tokens": 128,
+      "max_new_tokens": 160,
+      // (clue, answer) pairs per generate() call.
+      "batch_size": 32
+    }
+  },
+
+  "scorer": {
+    "model": "ronietz/cryptic-deberta-large-reasoning-scorer"
+  }
+}
